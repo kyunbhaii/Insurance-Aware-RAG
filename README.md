@@ -1,25 +1,26 @@
-# 🔍 ClaimLens
+# Insurance Aware RAG
 
 > **AI-powered RAG system for insurance policy analysis.**
 
-ClaimLens is an advanced Retrieval-Augmented Generation (RAG) system designed to extract and reason over complex insurance policy clauses. It utilizes hybrid retrieval (FAISS + BM25) combined with cross-encoder reranking to accurately answer policy-related queries with high-confidence citations.
+This RAG system is an advanced Retrieval-Augmented Generation (RAG) system designed to extract and reason over complex insurance policy clauses. It utilizes a two-stage retrieval pipeline (Dense Retrieval + Cross-Encoder Reranking) combined with strictly enforced structural validation to accurately answer policy-related queries with high-confidence citations.
 
-## 🌟 Key Features
+## Key Features & Architectural Specialties
 
-- **Intelligent Ingestion**: Automatically loads, parses, and chunks insurance policies (PDFs) into logical, clause-level documents.
-- **Hybrid Retrieval**: Employs Dense embeddings (FAISS) alongside Sparse term-matching (BM25) for high recall.
-- **Cross-Encoder Reranking**: Re-evaluates retrieved clauses to ensure maximum relevance to user queries.
-- **Advanced Reasoning Engine**: Leverages LLMs (via Groq/LangChain) to provide precise, structured answers with source citations.
-- **Audit-Ready Accuracy**: Provides confidence scores and exact clause IDs (including start pages) for every generated answer.
+- **Deterministic Clause Splitting**: Abandons naive text chunking. Policies are parsed into atomic structural clauses with deterministic, stable IDs (e.g., `ICICILombard_p8_Grace_Period_1`) to ensure perfect evaluation traceability and prevent vector overwrites.
+- **Two-Stage Retrieval Pipeline**: 
+  - *Candidate Generation*: High-recall dense retrieval using FAISS (`BAAI/bge-base-en-v1.5`).
+  - *Cross-Encoder Reranking*: Precision reranking of the top candidates using `BAAI/bge-reranker-base` to surface the most relevant evidence.
+- **Strictly Validated Reasoning**: Leverages exact Pydantic schemas (`RAGResponse`, `Citation`) to strictly enforce LLM output. The system acts as a structural firewall that rejects ungrounded hallucinated citations and logically contradictory responses.
+- **Fail-Fast Engineering**: Designed with strict internal verification. Duplicate clause IDs raise errors during ingestion, and retrieval/reasoning layers fail fast on missing context to avoid silent degradation. 
+- **Validation-Driven Evaluation Framework**: Includes a built-in evaluator (`evaluate_stagewise`, `evaluate_multi_clause`) mapping ground-truth clause IDs to measure exact Retrieval Recall@K and MRR.
+## Architecture Stack
 
-## 🏗️ Architecture Stack
-
-- **Framework**: [LangChain](https://github.com/langchain-ai/langchain) & [LangGraph](https://github.com/langchain-ai/langgraph)
-- **Vector Store**: [FAISS](https://github.com/facebookresearch/faiss) (CPU) & BM25
-- **Embeddings**: HuggingFace (`BAAI/bge-base-en-v1.5`)
+- **Framework**: [LangChain](https://github.com/langchain-ai/langchain) & [LangGraph](https://github.com/langchain-ai/langgraph), with [Pydantic](https://docs.pydantic.dev/) for strict schema validation
+- **Vector Store**: [FAISS](https://github.com/facebookresearch/faiss) (CPU)
+- **Embeddings**: `BAAI/bge-base-en-v1.5` (Dense) & `BAAI/bge-reranker-base` (Cross-Encoder)
 - **LLM Engine**: Groq (Llama-based inference)
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -30,8 +31,8 @@ ClaimLens is an advanced Retrieval-Augmented Generation (RAG) system designed to
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/ClaimLens.git
-   cd ClaimLens
+   git clone https://github.com/kyunbhaii/Insurance-Aware-RAG.git
+   cd Insurance-Aware-RAG
    ```
 
 2. **Set up a virtual environment** (recommended):
@@ -51,7 +52,7 @@ ClaimLens is an advanced Retrieval-Augmented Generation (RAG) system designed to
    GROQ_API_KEY="your_actual_groq_api_key"
    ```
 
-## 🛠️ Usage
+## Usage
 
 ### 1. Place Your Data
 Place your insurance policy PDFs in the `data/` directory. For example, `data/icici_complete_health.pdf`.
@@ -78,27 +79,27 @@ Confidence: High
 - **Data Ingestion Preview**: `python -m scripts.main` to preview how your PDF is split into clauses.
 - **Evaluation**: Explore `app/evaluation` and `scripts/run_evaluation.py` for comprehensive RAG testing.
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 ClaimLens/
 ├── app/
-│   ├── config.py             # System configuration
-│   ├── ingestion/            # Document loaders and chunking splitters
-│   ├── retrieval/            # Hybrid retriever (FAISS + BM25 + Reranker)
-│   ├── reasoning/            # Prompts, schemas, and LLM reasoners
-│   └── pipeline.py           # Core RAG orchestration pipeline
-├── data/                     # Source PDFs (Policy documents)
-├── docs/                     # Additional documentation
-├── scripts/                  # CLI scripts (run_pipeline, evaluation, etc.)
-├── indexes/                  # Generated FAISS/BM25 Vector stores
-└── requirements.txt          # Python dependencies
+│   ├── config.py
+│   ├── ingestion/
+│   ├── retrieval/
+│   ├── reasoning/
+│   └── pipeline.py
+├── data/
+├── docs/
+├── scripts/
+├── indexes/
+└── requirements.txt
 ```
 
-## 🤝 Contributing
+## Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/yourusername/ClaimLens/issues).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/kyunbhaii/Insurance-Aware-RAG/issues).
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
