@@ -1,6 +1,6 @@
-# ClaimLens Architecture Decisions (Updated)
+# Architecture Decisions (Updated)
 
-This document defines the canonical engineering architecture for ClaimLens after structural hardening of:
+This document defines the canonical engineering architecture for Insurance-Aware RAG after structural hardening of:
 
 - Clause Splitter
 - Retriever (Dense + Cross-Encoder)
@@ -326,12 +326,13 @@ Atomic chunking ensures:
 
 # 3. Retrieval Architecture (retriever.py)
 
-ClaimLens uses a two-stage retrieval pipeline.
+ClaimLens uses a two-stage hybrid retrieval pipeline.
 
-No weighted hybrid merging is used in current production.
+## 3.1 Stage 1: Candidate Generation (Dense + Sparse)
 
-## 3.1 Dense Retrieval (Candidate Generation)
+The system merges two distinct retrieval strategies to maximize candidate recall.
 
+### 3.1.1 Dense Retrieval
 Embedding model:
 
     BAAI/bge-base-en-v1.5
@@ -342,13 +343,26 @@ Vector store:
 
 Configuration:
 
-- Top-K retrieval = 40
+- Top-K retrieval = 40 (or 60, depending on config)
 
 Purpose:
-
 - High semantic recall
 - Large candidate pool
-- No heuristic filtering
+- Resolves vocabulary mismatch
+
+### 3.1.2 Sparse Lexical Retrieval
+
+Unlike prior design assertions, ClaimLens *does* run a parallel BM25 retrieval stage during candidate generation (`langchain_community.retrievers.BM25Retriever`).
+
+Configuration:
+- Top-K retrieval = matches dense top_K
+
+Purpose:
+- Exact keyword matching
+- Recovers entities (e.g., specific drug names or specific codes) that dense embeddings might miss.
+
+### 3.1.3 Hybrid Merging
+The `retriever.py` module executes both stages, concatenates the resulting `Document` lists, and deduplicates the pool using canonical `clause_id` metadata. This deduplicated `hybrid_pool` is then passed to Stage 2.
 
 ## 3.2 Cross-Encoder Reranking
 
@@ -372,24 +386,23 @@ Purpose:
 - Boost MRR
 - Reduce ranking noise
 
-## 3.3 Why No Weighted Hybrid?
+## 3.3 Why No Weighted Hybrid Scoring?
 
-Previous documentation referenced hybrid BM25 weighting.
+Previous documentation (or naive RAG designs) typically relies on complex reciprocal rank fusion (RRF) or normalized score weighting (e.g., `(dense_score * alpha) + (sparse_score * (1-alpha))`). 
+
+ClaimLens architecture abandons manual score merging.
 
 Current production design:
 
-- Dense + Cross-Encoder only
-- No score merging
-- No manual weighting
-- No normalization complexity
+- FAISS Top-K merged directly with BM25 Top-K.
+- De-duplicated by clause ID.
+- Passed entirely to the Cross-Encoder.
 
 Reason:
 
-- Cross-encoder implicitly learns weighting
-- Simpler pipeline
-- More deterministic debugging
-
-Hybrid lexical retrieval remains future extensibility, not current implementation.
+- The reranking cross-encoder model naturally learns the optimal weighting between exact matches and semantic similarity through cross-attention.
+- Avoids fragile calibration of alpha weights.
+- Pipeline execution remains fully deterministic and debuggable without complex math.
 
 ## 3.4 Retrieval Philosophy
 
@@ -1081,6 +1094,47 @@ Exceptions are treated as controlled failure signals, not unexpected crashes.
 
 ClaimLens prioritizes structural safety over permissive execution.
 
+## 5.5 query_builder.py
+
+The `query_builder.py` module solves the "vocabulary gap" between raw clinical inputs (e.g., medical reports, discharge summaries) and the formal legal language used in insurance policies.
+
+Without a query builder, searching a policy document for "patient fell down stairs and broke leg" would yield poor lexical and semantic overlap with policy terms like "emergency hospitalization" or "accidental injury".
+
+### 5.5.1 Architectural Role
+
+The `ClaimLensQueryBuilder` is positioned BEFORE the retrieval pipeline. 
+
+Execution Flow:
+
+    Raw Medical Input
+        → Query Builder (LLM)
+        → Neutral Retrieval Sentence + Keywords
+        → Pipeline (Retriever + Reasoner)
+
+This abstraction allows the core RAG pipeline (`pipeline.py`) to remain agnostic to the format of the user's input. The pipeline always receives an optimized retrieval string.
+
+### 5.5.2 Strict Processing Constraints
+
+The `QUERY_BUILDER_PROMPT` enforces rigid guidelines on the LLM to ensure the generated query behaves predictably in the vector space:
+
+1. **Absolute Neutrality**: 
+   The generated query must NOT assume coverage. It describes the medical event neutrally (e.g., "hospitalization expenses for a fractured femur" rather than "is a fractured femur covered?").
+2. **No Patient Identifiers**: 
+   Names, ages, hospitals, and dates are explicitly stripped to prevent vector drift and maintain privacy constraints.
+3. **No Boolean Operators**: 
+   The output must be pure natural language. Injecting `AND`, `OR`, or `NOT` into dense embedding models degrades semantic matching quality.
+4. **Vocabulary Standardization**: 
+   Clinical jargon is mapped to insurance-standard terminology (e.g., "inpatient care", "waiting periods", "exclusions").
+
+### 5.5.3 Why a Separate LLM Call?
+
+Using an LLM to rewrite the query *before* retrieval might seem like an extra hop, but it is architecturally necessary:
+
+- **Embeddings are literal**: A dense model evaluates the geometric distance between the input text and the clause text. If the vocabularies do not overlap, distance increases.
+- **Rerankers need focus**: Providing a reranker with patient noise degrades its ability to score legal relevance.
+
+The query builder acts as a translation layer, ensuring the retriever operates under optimal semantic conditions.
+
 ---
 
 # 6. Pipeline Layer (pipeline.py)
@@ -1400,16 +1454,34 @@ User Interaction Layer (CLI or API)
 
 This separation ensures that production logic remains untouched while experimentation and demonstrations remain controlled.
 
-## 9.8 Production Consideration
+## 9.8 test_retrieval.py
+
+The `test_retrieval.py` script is a diagnostic environment dedicated specifically to benchmarking the full retrieval layer without invoking the structured reasoner.
+
+It introduces clinical noise (e.g., Discharge Summaries full of dates and patient conditions) to test the upstream flow:
+1. Simulates realistic Clinical Inputs.
+2. Invokes the `ClaimLensQueryBuilder` to neutralize the problem statement.
+3. Passes the clean query to `ClaimLensRetriever` (Dense + BM25).
+4. Prints the retrieved clause ranks and metadata.
+
+It is indispensable for isolating retrieval failures and verifying the strength of the `Query Builder`.
+
+## 9.9 export_clauses.py
+
+Rather than executing RAG logic, `export_clauses.py` forces the `health_policy_splitter` to run across various defined PDF manuals and directly dump all correctly parsed atomic clauses (and their metadata) into a raw `.json` datastore.
+
+This script ensures transparency. It permits manual spot-checking of the clause-splitting boundaries and allows downstream data engineering teams to use ClaimLens's parser independently of the generative models.
+
+## 9.10 Production Consideration
 
 In production deployment:
 
-- `run_pipeline.py` is not used.
-- API layer (e.g., FastAPI) will import and use `ClaimLensPipeline`.
+- The `scripts/` directory is not used.
+- API layer (e.g., FastAPI) will import and use `ClaimLensPipeline` directly.
 - Logging configuration will move to server-level settings.
 - Environment configuration will be handled by deployment infrastructure.
 
-The execution script exists purely for:
+The execution scripts exist purely for:
 
 - Local verification
 - Engineering validation
@@ -1452,33 +1524,40 @@ The diagram below represents logical component boundaries, not infrastructure de
 
 ```
                 ┌────────────────────┐
-                │      User Query     │
+                │ Raw Clinical Input │
+                │   (User Query)     │
                 └─────────┬──────────┘
                           │
                           ▼
                 ┌────────────────────┐
-                │  Pipeline Layer     │
-                │ (Orchestration)     │
+                │ Query Builder Layer│
+                │ (LLM Translation)  │
+                └─────────┬──────────┘
+                          │ Optimized Query
+                          ▼
+                ┌────────────────────┐
+                │  Pipeline Layer    │
+                │  (Orchestration)   │
                 └─────────┬──────────┘
                           │
           ┌───────────────┴────────────────┐
           ▼                                ▼
 ┌────────────────────┐          ┌────────────────────┐
-│   Retriever Layer   │          │   Reasoning Layer  │
-│ (Dense + BM25 +     │          │  (LLM + Validation)│
-│  Reranker)          │          └─────────┬──────────┘
+│  Retriever Layer   │          │  Reasoning Layer   │
+│ (Dense + BM25  →   │          │ (LLM + Validation) │
+│  Cross-Encoder)    │          └─────────┬──────────┘
 └─────────┬──────────┘                    │
-          │                                ▼
+          │                               ▼
           ▼                     ┌────────────────────┐
-┌────────────────────┐          │  Output Schema     │
-│   Vector Store      │          │  (Pydantic Model)  │
-│   + BM25 Index      │          └─────────┬──────────┘
+┌────────────────────┐          │   Output Schema    │
+│    Vector Store    │          │  (Pydantic Model)  │
+│    + BM25 Index    │          └─────────┬──────────┘
 └────────────────────┘                    │
-                                           ▼
-                                 ┌────────────────────┐
-                                 │  Structured Answer  │
-                                 │  (RAGResponse)      │
-                                 └────────────────────┘
+                                          ▼
+                                ┌────────────────────┐
+                                │ Structured Answer  │
+                                │   (RAGResponse)    │
+                                └────────────────────┘
 ```
 
 ## 10.2 Layer Responsibilities (At a Glance)
@@ -1490,6 +1569,11 @@ Ingestion Layer:
 Structural Parsing Layer:
 - Converts pages → deterministic legal clauses
 - Generates canonical clause IDs
+
+Query Builder Layer:
+- Receives raw clinical text
+- Standardizes vocabulary and strips PII
+- Resolves vocabulary mismatch with legal terms
 
 Retrieval Layer:
 - Generates candidate clauses (Dense + BM25)
